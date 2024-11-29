@@ -79,7 +79,7 @@ class RolloutStorage:
         self.step += 1
 
     def _save_hidden_states(self, hidden_states):
-        if hidden_states is None or hidden_states == (None, None):
+        if hidden_states is None or hidden_states == (None, None) or (None, None, None) in hidden_states:
             return
         # make a tuple out of GRU hidden state sto match the LSTM format
         hid_a = hidden_states[0] if isinstance(hidden_states[0], tuple) else (hidden_states[0],)
@@ -205,13 +205,13 @@ class RolloutStorage:
                 # take a batch of trajectories and finally reshape back to [num_layers, batch, hidden_dim]
                 last_was_done = last_was_done.permute(1, 0)
                 hid_a_batch = [
-                    saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
+                    saved_hidden_states.permute(2, 0, 1, 3, 4, 5)[last_was_done][first_traj:last_traj] # (2, 0, 1, 3, 4, 5)
                     .transpose(1, 0)
                     .contiguous()
                     for saved_hidden_states in self.saved_hidden_states_a
                 ]
                 hid_c_batch = [
-                    saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj]
+                    saved_hidden_states.permute(2, 0, 1, 3, 4, 5)[last_was_done][first_traj:last_traj] # (2, 0, 1, 3, 4, 5)
                     .transpose(1, 0)
                     .contiguous()
                     for saved_hidden_states in self.saved_hidden_states_c
