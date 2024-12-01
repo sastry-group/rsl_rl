@@ -67,9 +67,9 @@ def apply_rotary_emb(
     t_middle = t[..., start_index:end_index]
     t_right = t[..., end_index:]
 
-    # Apply rotary embeddings without modifying t in place    
+    # Apply rotary embeddings without modifying t in place
     t_transformed = (t_middle * freqs.cos() * scale) + (rotate_half(t_middle) * freqs.sin() * scale)
-        
+
     out = torch.cat((t_left, t_transformed, t_right), dim=-1)
 
     return out.type(dtype)
@@ -169,23 +169,56 @@ class RotaryEmbedding(Module):
         return self.dummy.device
 
     def get_seq_pos(self, seq_len, device, dtype, offset = 0):
-        return (torch.arange(seq_len, device = device, dtype = dtype) + offset) / self.interpolate_factor
+        positions = torch.arange(seq_len, device=device, dtype=dtype)
+        if torch.is_tensor(offset):
+            positions = positions.unsqueeze(0)  # shape (1, seq_len)
+            offset = offset.unsqueeze(1)  # shape (batch_size, 1)
+            seq = (positions + offset) / self.interpolate_factor  # shape (batch_size, seq_len)
+        else:
+            seq = (positions + offset) / self.interpolate_factor  # shape (seq_len,)
+        return seq  # shape is (batch_size, seq_len) if offset is tensor, else (seq_len,)
 
     def rotate_queries_or_keys(self, t, seq_dim = None, offset = 0, scale = None):
         seq_dim = default(seq_dim, self.default_seq_dim)
 
         assert not self.use_xpos or exists(scale), 'you must use `.rotate_queries_and_keys` method instead and pass in both queries and keys, for length extrapolatable rotary embeddings'
 
-        device, dtype, seq_len = t.device, t.dtype, t.shape[seq_dim]
+        device, dtype = t.device, t.dtype
 
-        seq = self.get_seq_pos(seq_len, device = device, dtype = dtype, offset = offset)
+        seq_len = t.shape[seq_dim]
 
-        freqs = self.forward(seq, seq_len = seq_len, offset = offset)
+        seq = self.get_seq_pos(seq_len, device=device, dtype=dtype, offset=offset)
 
-        if seq_dim == -3:
-            freqs = rearrange(freqs, 'n d -> n 1 d')
-        
-        return apply_rotary_emb(freqs, t, scale = default(scale, 1.), seq_dim = seq_dim)
+        freqs = self.forward(seq, seq_len=seq_len)
+
+        # Expand freqs to match t's dimensions
+        # t shape: (batch_size, num_heads, seq_len, head_dim)
+        # freqs shape: (batch_size, seq_len, head_dim) or (seq_len, head_dim)
+
+        if freqs.ndim == 2:
+            # freqs shape: (seq_len, head_dim)
+            freqs = freqs.unsqueeze(0).unsqueeze(0)  # shape: (1, 1, seq_len, head_dim)
+        else:
+            # freqs shape: (batch_size, seq_len, head_dim)
+            freqs = freqs.unsqueeze(1)  # shape: (batch_size, 1, seq_len, head_dim)
+
+        # Now freqs can broadcast over batch_size and num_heads
+
+        if exists(scale):
+            if torch.is_tensor(scale):
+                if scale.ndim == 2:
+                    # scale shape: (batch_size, seq_len)
+                    scale = scale.unsqueeze(1).unsqueeze(-1)  # shape: (batch_size, 1, seq_len, 1)
+                elif scale.ndim == 1:
+                    # scale shape: (seq_len,)
+                    scale = scale.unsqueeze(0).unsqueeze(0).unsqueeze(-1)  # shape: (1, 1, seq_len, 1)
+            else:
+                # scale is scalar
+                pass
+        else:
+            scale = 1.
+
+        return apply_rotary_emb(freqs, t, scale=scale, seq_dim=seq_dim)
 
     def rotate_queries_with_cached_keys(self, q, k, seq_dim = None, offset = 0):
         dtype, device, seq_dim = q.dtype, q.device, default(seq_dim, self.default_seq_dim)
@@ -196,13 +229,12 @@ class RotaryEmbedding(Module):
         q_scale = k_scale = 1.
 
         if self.use_xpos:
-            seq = self.get_seq_pos(k_len, dtype = dtype, device = device)
-
-            q_scale = self.get_scale(seq[-q_len:]).type(dtype)
+            seq = self.get_seq_pos(k_len, dtype=dtype, device=device, offset=0)
+            q_scale = self.get_scale(seq[:, -q_len:]).type(dtype)
             k_scale = self.get_scale(seq).type(dtype)
 
-        rotated_q = self.rotate_queries_or_keys(q, seq_dim = seq_dim, scale = q_scale, offset = k_len - q_len + offset)
-        rotated_k = self.rotate_queries_or_keys(k, seq_dim = seq_dim, scale = k_scale ** -1)
+        rotated_q = self.rotate_queries_or_keys(q, seq_dim=seq_dim, scale=q_scale, offset=k_len - q_len + offset)
+        rotated_k = self.rotate_queries_or_keys(k, seq_dim=seq_dim, scale=k_scale ** -1, offset=offset)
 
         rotated_q = rotated_q.type(q.dtype)
         rotated_k = rotated_k.type(k.dtype)
@@ -213,19 +245,25 @@ class RotaryEmbedding(Module):
         seq_dim = default(seq_dim, self.default_seq_dim)
 
         assert self.use_xpos
-        device, dtype, seq_len = q.device, q.dtype, q.shape[seq_dim]
+        device, dtype = q.device, q.dtype
 
-        seq = self.get_seq_pos(seq_len, dtype = dtype, device = device)
+        seq_len = q.shape[seq_dim]
 
-        freqs = self.forward(seq, seq_len = seq_len)
-        scale = self.get_scale(seq, seq_len = seq_len).to(dtype)
+        seq = self.get_seq_pos(seq_len, dtype=dtype, device=device)
 
-        if seq_dim == -3:
-            freqs = rearrange(freqs, 'n d -> n 1 d')
-            scale = rearrange(scale, 'n d -> n 1 d')
+        freqs = self.forward(seq, seq_len=seq_len)
+        scale = self.get_scale(seq, seq_len=seq_len).to(dtype)
 
-        rotated_q = apply_rotary_emb(freqs, q, scale = scale, seq_dim = seq_dim)
-        rotated_k = apply_rotary_emb(freqs, k, scale = scale ** -1, seq_dim = seq_dim)
+        # Expand freqs and scale to match q and k
+        if freqs.ndim == 2:
+            freqs = freqs.unsqueeze(0).unsqueeze(0)  # shape: (1, 1, seq_len, head_dim)
+            scale = scale.unsqueeze(0).unsqueeze(0).unsqueeze(-1)  # shape: (1, 1, seq_len, 1)
+        else:
+            freqs = freqs.unsqueeze(1)  # shape: (batch_size, 1, seq_len, head_dim)
+            scale = scale.unsqueeze(1).unsqueeze(-1)  # shape: (batch_size, 1, seq_len, 1)
+
+        rotated_q = apply_rotary_emb(freqs, q, scale=scale, seq_dim=seq_dim)
+        rotated_k = apply_rotary_emb(freqs, k, scale=scale ** -1, seq_dim=seq_dim)
 
         rotated_q = rotated_q.type(q.dtype)
         rotated_k = rotated_k.type(k.dtype)
@@ -240,30 +278,70 @@ class RotaryEmbedding(Module):
     ):
         assert self.use_xpos
 
-        should_cache = (
-            self.cache_if_possible and
-            exists(seq_len) and
-            (offset + seq_len) <= self.cache_max_seq_len
-        )
+        # Disable caching if offset is a tensor
+        if torch.is_tensor(offset):
+            should_cache = False
+        else:
+            should_cache = (
+                self.cache_if_possible and
+                exists(seq_len) and
+                (offset + seq_len) <= self.cache_max_seq_len
+            )
 
         if (
-            should_cache and \
-            exists(self.cached_scales) and \
+            should_cache and
+            exists(self.cached_scales) and
             (seq_len + offset) <= self.cached_scales_seq_len.item()
         ):
             return self.cached_scales[offset:(offset + seq_len)]
 
         scale = 1.
         if self.use_xpos:
-            power = (t - len(t) // 2) / self.scale_base
-            scale = self.scale ** rearrange(power, 'n -> n 1')
-            scale = repeat(scale, 'n d -> n (d r)', r = 2)
+            power = (t - t.shape[-1] // 2) / self.scale_base
+            scale = self.scale ** rearrange(power, '... -> ... 1')
+            scale = repeat(scale, '... d -> ... (d r)', r = 2)
 
         if should_cache and offset == 0:
             self.cached_scales[:seq_len] = scale.detach()
             self.cached_scales_seq_len.copy_(seq_len)
 
         return scale
+
+    @autocast('cuda', enabled = False)
+    def forward(
+        self,
+        t: Tensor,
+        seq_len = None
+    ):
+        # Disable caching if t has batch dimension (i.e., offset is a tensor)
+        if t.ndim > 1:
+            should_cache = False
+        else:
+            should_cache = (
+                self.cache_if_possible and
+                not self.learned_freq and
+                exists(seq_len) and
+                self.freqs_for != 'pixel' and
+                seq_len <= self.cache_max_seq_len
+            )
+
+        if (
+            should_cache and
+            exists(self.cached_freqs) and
+            seq_len <= self.cached_freqs_seq_len.item()
+        ):
+            return self.cached_freqs[:seq_len].detach()
+
+        freqs = self.freqs
+
+        freqs = einsum('..., f -> ... f', t.type(freqs.dtype), freqs)
+        freqs = repeat(freqs, '... n -> ... (n r)', r = 2)
+
+        if should_cache:
+            self.cached_freqs[:seq_len] = freqs.detach()
+            self.cached_freqs_seq_len.copy_(seq_len)
+
+        return freqs
 
     def get_axial_freqs(self, *dims):
         Colon = slice(None)
@@ -275,7 +353,9 @@ class RotaryEmbedding(Module):
             else:
                 pos = torch.arange(dim, device = self.device)
 
-            freqs = self.forward(pos, seq_len = dim)
+            seq_len = dim
+            seq_pos = self.get_seq_pos(seq_len, device=self.device, dtype=pos.dtype, offset=0)
+            freqs = self.forward(seq_pos, seq_len=seq_len)
 
             all_axis = [None] * len(dims)
             all_axis[ind] = Colon
@@ -285,36 +365,3 @@ class RotaryEmbedding(Module):
 
         all_freqs = broadcast_tensors(*all_freqs)
         return torch.cat(all_freqs, dim = -1)
-
-    @autocast('cuda', enabled = False)
-    def forward(
-        self,
-        t: Tensor,
-        seq_len = None,
-        offset = 0
-    ):
-        should_cache = (
-            self.cache_if_possible and
-            not self.learned_freq and
-            exists(seq_len) and
-            self.freqs_for != 'pixel' and
-            (offset + seq_len) <= self.cache_max_seq_len
-        )
-
-        if (
-            should_cache and \
-            exists(self.cached_freqs) and \
-            (offset + seq_len) <= self.cached_freqs_seq_len.item()
-        ):
-            return self.cached_freqs[offset:(offset + seq_len)].detach()
-
-        freqs = self.freqs
-
-        freqs = einsum('..., f -> ... f', t.type(freqs.dtype), freqs)
-        freqs = repeat(freqs, '... n -> ... (n r)', r = 2)
-
-        if should_cache and offset == 0:
-            self.cached_freqs[:seq_len] = freqs.detach()
-            self.cached_freqs_seq_len.copy_(seq_len)
-
-        return freqs
