@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import copy
 from torch.distributions import Normal
 from torchtune.modules import RotaryPositionalEmbeddings
 from rsl_rl.modules.actor_critic import get_activation
@@ -24,6 +25,7 @@ class ActorCriticTransformer(nn.Module):
         transformer_num_layers=1,
         transformer_num_heads=8,
         context_len=16,
+        dropout_rate=0.1,
         init_noise_std=1.0,
         **kwargs,
     ):
@@ -34,10 +36,10 @@ class ActorCriticTransformer(nn.Module):
 
         super().__init__()
         # Policy
-        self.actor = Memory(num_actor_obs, num_actions, context_len, transformer_hidden_size, transformer_num_heads, transformer_num_layers)
+        self.actor = Memory(num_actor_obs, num_actions, context_len, dropout_rate, transformer_hidden_size, transformer_num_heads, transformer_num_layers)
 
         # Value function
-        self.critic = Memory(num_critic_obs, 1, context_len, transformer_hidden_size, transformer_num_heads, transformer_num_layers)
+        self.critic = Memory(num_critic_obs, 1, context_len, dropout_rate, transformer_hidden_size, transformer_num_heads, transformer_num_layers)
 
         print(f"Actor Transformer: {self.actor}")
         print(f"Critic Transformer: {self.critic}")
@@ -100,14 +102,14 @@ class ActorCriticTransformer(nn.Module):
             past_keys = torch.stack(past_keys)
             past_values = [past_key_values[i][1] for i in range(len(past_key_values))]
             past_values = torch.stack(past_values)
-            counter_arr = torch.full((1, past_keys.shape[1], 1, 1, 1), actor.counter)
+            counter_arr = torch.full((1, past_keys.shape[1], 1, 1, 1), actor.counter, device=past_keys.device)
             return past_keys, past_values, counter_arr
         return get_past_key_values(self.actor), get_past_key_values(self.critic)
 
 class Memory(torch.nn.Module):
-    def __init__(self, num_actor_obs, num_actions, context_len, transformer_hidden_size, transformer_num_heads, transformer_num_layers):
+    def __init__(self, num_actor_obs, num_actions, context_len, dropout_rate, transformer_hidden_size, transformer_num_heads, transformer_num_layers):
         super().__init__()
-        self.transformer = Transformer(num_actor_obs, num_actions, context_len, transformer_hidden_size, transformer_num_heads, transformer_num_layers)
+        self.transformer = Transformer(num_actor_obs, num_actions, context_len, transformer_hidden_size, transformer_num_heads, transformer_num_layers, dropout_rate)
         self.counter = 0
 
     def forward(self, input, masks=None, hidden_states=None):
@@ -130,9 +132,10 @@ class Memory(torch.nn.Module):
                 past_key_values.append((past_key[layer_num], past_value[layer_num]))
             old_past_key_values = self.transformer.past_key_values
             old_counter = self.counter
-            self.transformer.past_key_values = past_key_values
-            self.counter = stored_counter.view(-1)
+            self.transformer.past_key_values = copy.deepcopy(past_key_values)
+            self.counter = copy.deepcopy(stored_counter.view(-1))
             out = []
+            # out_test = self.transformer(input, use_cache=True, update_cache=True, position_step=self.counter)
             for i in range(len(input)):
                 # go through each step in the horizon
                 out.append(self.transformer(input[i].unsqueeze(1), use_cache=True, update_cache=True, position_step=self.counter)[:, -1, :])
@@ -151,3 +154,30 @@ class Memory(torch.nn.Module):
         for layer_kv in self.transformer.past_key_values:
             for kv in layer_kv:
                 kv[dones.bool()] = 0.0 # type: ignore
+
+def test_transformer():
+    # seed
+    torch.manual_seed(42)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    transformer = ActorCriticTransformer(num_actor_obs=10, num_critic_obs=10, num_actions=2, context_len=16, dropout_rate=0.0, transformer_hidden_size=256, transformer_num_heads=8, transformer_num_layers=1).to(device)
+    episode_len = 48
+    batch_size = 32
+    input = torch.randn(episode_len, batch_size, 10, device=device)
+    masks = torch.ones(episode_len, batch_size, dtype=torch.bool, device=device)
+    outputs = []
+    hidden_states = []
+
+    with torch.inference_mode():
+        transformer.act(input[0])
+        for i in range(episode_len):
+            hidden_states.append(transformer.get_hidden_states())
+            outputs.append(transformer.act(input[i]))
+    outputs = torch.stack(outputs)
+
+    outputs_compare = transformer.act(input, masks, hidden_states[0][0])
+    diff = outputs - outputs_compare
+    print(diff.abs().max())
+    pass
+
+if __name__ == "__main__":
+    test_transformer()

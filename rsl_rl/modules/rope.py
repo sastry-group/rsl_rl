@@ -92,7 +92,7 @@ class RotaryEmbedding(Module):
         dim,
         custom_freqs: Tensor | None = None,
         freqs_for:  Literal['lang', 'pixel', 'constant'] = 'lang',
-        theta = 10000,
+        theta = 100,
         max_freq = 10,
         num_freqs = 1,
         learned_freq = False,

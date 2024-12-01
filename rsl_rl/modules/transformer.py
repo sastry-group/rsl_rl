@@ -101,6 +101,7 @@ class Transformer_Block(nn.Module):
         super().__init__()
         self.num_head = num_head
         self.latent_dim = latent_dim
+        self.head_dim = latent_dim // num_head
         self.context_length = context_length
         self.ln_1 = nn.LayerNorm(latent_dim)
         self.attn = MultiheadAttentionWithKVCache(latent_dim, num_head, dropout=dropout_rate, context_length=context_length)
@@ -118,8 +119,8 @@ class Transformer_Block(nn.Module):
         # x: (batch_size, context_length, latent_dim)
         if past_key is None and past_value is None and use_cache and update_cache:
             prepend_size = max(self.context_length - x.size(1), 0)
-            prepend_zeros = torch.zeros(x.size(0), prepend_size, x.size(2), device=x.device)
-            x = torch.cat([prepend_zeros, x], dim=1)
+            past_key = torch.zeros(x.size(0), self.num_head, prepend_size, self.head_dim, device=x.device)
+            past_value = torch.zeros(x.size(0), self.num_head, prepend_size, self.head_dim, device=x.device)
 
         x_ln = self.ln_1(x)
 
@@ -194,7 +195,7 @@ class Transformer(nn.Module):
                 if past_key is not None and past_value is not None:
                     seq_len = x.size(1)
 
-                    end_pos = self.context_len - seq_len
+                    end_pos = self.context_len - seq_len + 1
 
                     past_key = past_key[:, :, :end_pos, :]
                     past_value = past_value[:, :, :end_pos, :]
