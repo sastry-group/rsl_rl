@@ -134,13 +134,15 @@ class Memory(torch.nn.Module):
             old_counter = self.counter
             self.transformer.past_key_values = copy.deepcopy(past_key_values)
             self.counter = copy.deepcopy(stored_counter.view(-1))
-            out = []
-            # out_test = self.transformer(input, use_cache=True, update_cache=True, position_step=self.counter)
-            for i in range(len(input)):
-                # go through each step in the horizon
-                out.append(self.transformer(input[i].unsqueeze(1), use_cache=True, update_cache=True, position_step=self.counter)[:, -1, :])
-                self.counter += 1
-            out = torch.stack(out)
+            # out = []
+            # # out_test = self.transformer(input, use_cache=True, update_cache=True, position_step=self.counter)
+            # for i in range(len(input)):
+            #     # go through each step in the horizon
+            #     out.append(self.transformer(input[i].unsqueeze(1), use_cache=True, update_cache=True, position_step=self.counter)[:, -1, :])
+            #     self.counter += 1
+            # out = torch.stack(out)
+            input = input.transpose(0, 1)
+            out = self.transformer(input, use_cache=True, update_cache=True, position_step=self.counter).transpose(0, 1)
             out = unpad_trajectories(out, masks)
             self.transformer.past_key_values = old_past_key_values
             self.counter = old_counter
@@ -159,7 +161,7 @@ def test_transformer():
     # seed
     torch.manual_seed(42)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    transformer = ActorCriticTransformer(num_actor_obs=10, num_critic_obs=10, num_actions=2, context_len=16, dropout_rate=0.0, transformer_hidden_size=256, transformer_num_heads=8, transformer_num_layers=1).to(device)
+    transformer = ActorCriticTransformer(num_actor_obs=10, num_critic_obs=10, num_actions=2, context_len=128, dropout_rate=0.0, transformer_hidden_size=256, transformer_num_heads=8, transformer_num_layers=1).to(device)
     episode_len = 48
     batch_size = 32
     input = torch.randn(episode_len, batch_size, 10, device=device)
