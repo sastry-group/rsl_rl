@@ -6,6 +6,7 @@
 from .actor_critic import ActorCritic
 from .actor_critic_recurrent import ActorCriticRecurrent
 from .actor_critic_recurrent_ma import ActorCriticRecurrentMultiAgent
+from .actor_critic_ma import ActorCriticMultiAgent
 from .normalizer import EmpiricalNormalization
 
-__all__ = ["ActorCritic", "ActorCriticRecurrent", "ActorCriticRecurrentMultiAgent"]
+__all__ = ["ActorCritic", "ActorCriticRecurrent", "ActorCriticRecurrentMultiAgent", "ActorCriticMultiAgent"]

@@ -13,7 +13,7 @@ from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 import rsl_rl
 from rsl_rl.algorithms import PPO
 from rsl_rl.env import VecEnv
-from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, ActorCriticRecurrentMultiAgent, EmpiricalNormalization
+from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, ActorCriticRecurrentMultiAgent, ActorCriticMultiAgent, EmpiricalNormalization
 from rsl_rl.utils import store_code_state
 
 
@@ -27,9 +27,10 @@ class OnPolicyRunner:
         self.device = device
         self.env = env
         obs, extras = self.env.get_observations()
-        num_obs = obs.shape[1]
+        num_obs = obs.shape[1] if len(obs.shape) == 2 else obs.shape[1:]
         if "critic" in extras["observations"]:
-            num_critic_obs = extras["observations"]["critic"].shape[1]
+            critic_obs_shape = extras["observations"]["critic"].shape
+            num_critic_obs = critic_obs_shape[1] if len(critic_obs_shape) == 2 else critic_obs_shape[1:]
         else:
             num_critic_obs = num_obs
         actor_critic_class = eval(self.policy_cfg.pop("class_name"))  # ActorCritic
@@ -42,6 +43,7 @@ class OnPolicyRunner:
         self.save_interval = self.cfg["save_interval"]
         self.empirical_normalization = self.cfg["empirical_normalization"]
         if self.empirical_normalization:
+            # TODO: this does not work for multi-dimensional observations
             self.obs_normalizer = EmpiricalNormalization(shape=[num_obs], until=1.0e8).to(self.device)
             self.critic_obs_normalizer = EmpiricalNormalization(shape=[num_critic_obs], until=1.0e8).to(self.device)
         else:
@@ -51,8 +53,8 @@ class OnPolicyRunner:
         self.alg.init_storage(
             self.env.num_envs,
             self.num_steps_per_env,
-            [num_obs],
-            [num_critic_obs],
+            [num_obs] if isinstance(num_obs, int) else num_obs,
+            [num_critic_obs] if isinstance(num_critic_obs, int) else num_critic_obs,
             [self.env.num_actions],
         )
 
